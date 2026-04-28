@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Procesador de Reporte de Ventas</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
+    .container { max-width: 750px; margin: auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 0 15px rgba(0,0,0,0.1); }
+    h1 { text-align: center; color: #333; }
+    .upload-area { border: 2px dashed #007bff; padding: 25px; text-align: center; border-radius: 8px; margin: 20px 0; }
+    button { padding: 12px 28px; font-size: 16px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; }
+    button:hover { background: #0056b3; }
+    button:disabled { background: #6c757d; cursor: not-allowed; }
+    textarea { width: 100%; height: 80px; margin-top: 8px; }
+    .progress-container { margin: 25px 0; display: none; }
+    .progress-bar { height: 22px; background: #007bff; width: 0%; border-radius: 5px; transition: width 0.4s; }
+    #status { margin-top: 15px; padding: 12px; border-radius: 5px; text-align: center; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Procesador de Reporte de Ventas</h1>
+    <p>Sube tu archivo y obtén el Excel procesado igual que tu macro VBA.</p>
+
+    <div class="upload-area">
+      <input type="file" id="fileInput" accept=".xlsx,.xls" style="display:none;">
+      <button onclick="document.getElementById('fileInput').click()">Seleccionar Archivo Excel</button>
+      <p id="fileName" style="margin-top:10px; color:#555;"></p>
+    </div>
+
+    <label><strong>SKU adicionales para eliminar en columna CB:</strong></label><br>
+    <textarea id="extraSKUs" placeholder="Ejemplo: 12345, 67890, 99999&#10;Uno por línea o separados por coma"></textarea>
+
+    <br><br>
+    <button id="processBtn" onclick="procesarArchivo()" disabled>Procesar Archivo</button>
+
+    <!-- Barra de progreso -->
+    <div class="progress-container" id="progressContainer">
+      <p id="progressText" style="margin:5px 0;">Iniciando...</p>
+      <div style="background:#e0e0e0; border-radius:5px; height:22px;">
+        <div id="progressBar" class="progress-bar"></div>
+      </div>
+    </div>
+
+    <div id="status"></div>
+  </div>
+
+  <script>
+    const fileInput = document.getElementById('fileInput');
+    const fileNameEl = document.getElementById('fileName');
+    const processBtn = document.getElementById('processBtn');
+    const extraSKUsInput = document.getElementById('extraSKUs');
+    const progressContainer = document.getElementById('progressContainer');
+    const progressBar = document.getElementById('progressBar');
+    const progressText = document.getElementById('progressText');
+    const status = document.getElementById('status');
+
+    let selectedFile = null;
+
+    fileInput.addEventListener('change', (e) => {
+      selectedFile = e.target.files[0];
+      if (selectedFile) {
+        fileNameEl.textContent = selectedFile.name;
+        processBtn.disabled = false;
+      }
+    });
+
+    function updateProgress(percent, text) {
+      progressBar.style.width = percent + '%';
+      progressText.textContent = text;
+    }
+
+    function getColIndex(letter) {
+      let index = 0;
+      for (let i = 0; i < letter.length; i++) {
+        index = index * 26 + (letter.charCodeAt(i) - 64);
+      }
+      return index - 1; // 0-based
+    }
+
+    async function procesarArchivo() {
+      if (!selectedFile) return;
+
+      status.innerHTML = '';
+      progressContainer.style.display = 'block';
+      processBtn.disabled = true;
+      updateProgress(5, 'Cargando archivo...');
+
+      try {
+        const data = await selectedFile.arrayBuffer();
+        const workbook = XLSX.read(data, { type: 'array' });
+
+        let sheetName = workbook.SheetNames.find(n => n.toLowerCase() === "venta") || workbook.SheetNames[0];
+        let ws = workbook.Sheets[sheetName];
+        let jsonData = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+
+        if (jsonData.length < 2) throw new Error("El archivo no tiene suficientes datos.");
+
+        updateProgress(20, 'Eliminando filas según filtros...');
+
+        const P_idx  = getColIndex('P');   // 15
+        const BE_idx = getColIndex('BE');  // 56
+        const CB_idx = getColIndex('CB');  // 79
+
+        // Listas base del VBA
+        const deleteBE = ["15000","16000","17000","18000","19000","20000","21000","156000","20011"];
+        const deleteCB = ["0","99","555","1000","1001","12001","12002","12004","12514","14058","14060",
+                          "14103","20001","20002","20003","20004","20005","20006","20007","20010",
+                          "50000","50001","50002","50003","324235"];
+
+        // Agregar SKUs extra del usuario
+        let extraList = extraSKUsInput.value.trim();
+        if (extraList) {
+          extraList = extraList.split(/[\n,]+/).map(s => s.trim()).filter(s => s !== "");
+          deleteCB.push(...extraList);
+        }
+
+        // Eliminar filas (de abajo hacia arriba)
+        for (let i = jsonData.length - 1; i >= 1; i--) {
+          const row = jsonData[i];
+          const valP  = String(row[P_idx]  || "").trim().toUpperCase();
+          const valBE = String(row[BE_idx] || "").trim();
+          const valCB = String(row[CB_idx] || "").trim();
+
+          if (valP === "SI" || deleteBE.includes(valBE) || deleteCB.includes(valCB)) {
+            jsonData.splice(i, 1);
+          }
+        }
+
+        updateProgress(45, 'Ordenando por columna CB...');
+
+        // Ordenar por CB
+        jsonData.sort((a, b) => {
+          const va = String(a[CB_idx] || "");
+          const vb = String(b[CB_idx] || "");
+          return va.localeCompare(vb, undefined, { numeric: true });
+        });
+
+        updateProgress(60, 'Eliminando columnas (igual que tu VBA)...');
+
+        // === Eliminación exacta de columnas como en tu VBA ===
+        // Borramos de derecha a izquierda para no alterar índices
+        function deleteColumnRange(startCol, endCol) {
+          const startIdx = getColIndex(startCol);
+          const endIdx   = getColIndex(endCol);
+          jsonData.forEach(row => {
+            row.splice(startIdx, endIdx - startIdx + 1);
+          });
+        }
+
+        deleteColumnRange('DZ', 'GV');   // 1
+        deleteColumnRange('CZ', 'DX');   // 2
+        deleteColumnRange('CD', 'CX');   // 3
+        deleteColumnRange('T',  'CA');   // 4
+        deleteColumnRange('A',  'R');    // 5
+
+        updateProgress(85, 'Generando nuevo archivo...');
+
+        const newWs = XLSX.utils.aoa_to_sheet(jsonData);
+        const newWorkbook = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(newWorkbook, newWs, "Venta_Procesada");
+
+        updateProgress(100, 'Descargando...');
+
+        XLSX.writeFile(newWorkbook, "Reporte_Ventas_Procesado.xlsx");
+
+        status.innerHTML = `<span style="color:green; font-size:16px;">
+          ✅ Proceso completado con éxito.<br>
+          Archivo descargado: <strong>Reporte_Ventas_Procesado.xlsx</strong>
+        </span>`;
+
+      } catch (err) {
+        console.error(err);
+        status.innerHTML = `<span style="color:red">Error: ${err.message}</span>`;
+      } finally {
+        setTimeout(() => {
+          progressContainer.style.display = 'none';
+          processBtn.disabled = false;
+        }, 2000);
+      }
+    }
+  </script>
+</body>
+</html>
